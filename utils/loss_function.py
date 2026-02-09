@@ -41,19 +41,8 @@ def evaluate_model(model, loader):
 
 def inference_rollout(model, batch, device, stride, args):
     """
-    Merged Rollout Function: Supports both "Ground Truth Injection" and "Real-time Calculation" modes.
-    
-    Argument args['reality'] controls the source of physical quantities:
-    - True:  Hybrid Mode. Forces usage of ground truth grad_vec and C_ij from disk.
-             Used to diagnose model performance when physical quantities are perfect.
-    - False: Self-Consistent Mode. Calculates grad_vec and C_ij in real-time using currently predicted E, H.
-             Used for realistic testing and deployment.
-             
     Includes memory optimization: inference_mode, detach, empty_cache.
     """
-    
-    # Get control switch, defaults to False (Real-time calculation)
-    use_reality = args.get('reality', False)
     
     # [Memory Optimization 1] Use inference_mode
     with torch.inference_mode():
@@ -78,10 +67,7 @@ def inference_rollout(model, batch, device, stride, args):
         else:
              original_total_dt = original_t_vec.clone()
 
-        # Get sim_id (Required for Reality mode)
         sim_ids = batch.sim_id.cpu().numpy() if hasattr(batch, 'sim_id') else None
-        if use_reality and sim_ids is None:
-            raise ValueError("args['reality']=True but 'sim_id' not found in batch, cannot load ground truth!")
 
         # --- 3. Rollout Loop ---
         while curr_step < target_step:
@@ -112,55 +98,22 @@ def inference_rollout(model, batch, device, stride, args):
             # =========================================================
             # [Core Logic Branch] Physics Injection vs Real-time Calculation
             # =========================================================
-            if use_reality:
-                # --- Branch 1: Reality Mode (Reality=True) ---
-                # Load Ground Truth from disk
-                gt_grad_vec_list = []
-                gt_C_ij_list = []
+    
+            gt_grad_vec_list = []
+            gt_C_ij_list = []
+            
+            # This is an IO-intensive operation
+            for sim_id in sim_ids:
+                # Load ground truth at curr_step
+                gt_data = load_data_v4(sim_id, curr_step, curr_step + 1, args)
+                gt_grad_vec_list.append(gt_data.grad_vec)
+                gt_C_ij_list.append(gt_data.C_ij)
+                del gt_data # Memory optimization: burn after use
+            
+            # Inject ground truth into Batch
+            batch.grad_vec = torch.cat(gt_grad_vec_list, dim=0).to(device)
+            batch.C_ij = torch.cat(gt_C_ij_list, dim=0).to(device)
                 
-                # This is an IO-intensive operation
-                for sim_id in sim_ids:
-                    # Load ground truth at curr_step
-                    gt_data = load_data_v4(sim_id, curr_step, curr_step + 1, args)
-                    gt_grad_vec_list.append(gt_data.grad_vec)
-                    gt_C_ij_list.append(gt_data.C_ij)
-                    del gt_data # Memory optimization: burn after use
-                
-                # Inject ground truth into Batch
-                batch.grad_vec = torch.cat(gt_grad_vec_list, dim=0).to(device)
-                batch.C_ij = torch.cat(gt_C_ij_list, dim=0).to(device)
-                
-            else:
-                # --- Branch 2: Simulated Mode (Reality=False) ---
-                # Real-time calculation based on current predicted E, H
-                E_scalar_curr = current_x[:, 0]
-                H_edge_curr = current_edge_attr[:, 0:2]
-                
-                new_grad_vec, new_C_ij, _ = compute_physics_from_data(
-                    E_scalar_curr, 
-                    H_edge_curr, 
-                    batch.points, 
-                    batch.edge_index,
-                    use_curl=True
-                )
-                
-                # Inject calculated values into Batch
-                batch.grad_vec = new_grad_vec
-                batch.C_ij = new_C_ij
-
-            # =========================================================
-            # [Debug Print] Compare numerical magnitudes
-            # =========================================================
-            # To prevent screen flooding, only print the 1st step of each Batch, or remove this restriction
-            # if (curr_step - start_step) < 2: 
-            #     mode_str = "【Reality (GT)】" if use_reality else "【Simulated (Calc)】"
-            #     e_mean = current_x[:, 0].abs().mean().item()
-            #     h_mean = current_edge_attr[:, 0:2].abs().mean().item()
-            #     c_mean = batch.C_ij.abs().mean().item()
-            #     grad_mean = batch.grad_vec.abs().mean().item()
-                
-            #     print(f"Step {curr_step} {mode_str}: "
-            #           f"|E|={e_mean:.2e}, |H|={h_mean:.2e}, "
             #           f"|C_ij|={c_mean:.2e}, |Grad|={grad_mean:.2e}")
 
             # --- B. Model Prediction ---

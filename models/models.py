@@ -449,7 +449,7 @@ class EHEvolverSandwichModel(nn.Module):
         gnn_hidden_dim: int = 256,
         transformer_hidden_dim: int = 128,
         time_emb_dim: int = 64,
-        gnn_layers_each_stage: int = 3,
+        gnn_layers_each_stage: int = 4,
         transformer_heads: int = 4,
         transformer_head_dim: int = 32,
         transformer_ff_dim: int | None = None,
